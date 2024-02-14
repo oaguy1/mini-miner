@@ -1,6 +1,6 @@
-# pong-fennel
+# Mini-Miner
 
-A simple game of Pong in fennel, based on the [absolute minimal love2d fennel template](https://sr.ht/~benthor/absolutely-minimal-love2d-fennel/).
+A simple mining mini game in fennel, based on the [absolute minimal love2d fennel template](https://sr.ht/~benthor/absolutely-minimal-love2d-fennel/).
 
 ## Running
 
