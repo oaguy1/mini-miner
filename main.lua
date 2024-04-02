@@ -1,5 +1,6 @@
 -- Load fennel
-fennel = require("fennel")
+fennel = require("lib.fennel")
+wf = require("lib.windfield")
 
 -- Use fennel's tracebacks, makes things intelligeble
 debug.traceback = fennel.traceback

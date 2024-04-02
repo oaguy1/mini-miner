@@ -75,6 +75,24 @@
         (tset new-map j i 19)))) ;; blank tile
   new-map)
 
+(fn setup-map-physics [tile-map physics-world]
+  (local map-physics-objects [])
+  (for [j 1 (length tile-map)]
+    (for [i 1 (length (. tile-map j))]
+      (when (= (. (. tile-map j) i) 1)
+        (local block (physics-world:newRectangleCollider
+                             (+ (* (- i 1)  32) 1)
+                             (+ (* (- j 1) 32) 1)
+                             30
+                             30))
+        (block:setType "static")
+        (table.insert map-physics-objects block))))
+  map-physics-objects)
+
+(fn destroy-physics-objects [physics-objects]
+  (each [_ obj (ipairs physics-objects)]
+    (: obj.fixture :destroy)))
+
 (fn gen-quad-table [img tile-width tile-height first-tile num-tiles]
   (let [img-width (img:getWidth)
         img-height (img:getHeight)
@@ -96,15 +114,20 @@
   (: (love.thread.newThread "require('love.event')
 while 1 do love.event.push('stdin', io.read('*line')) end") :start)
 
+  (global world (wf.newWorld 0 0 true))
+
   (global level-map (gen-map 750 1))
   (global level-map-tiles (auto-tile level-map))
+  (global level-map-physics-objects (setup-map-physics level-map world))
   (global tile-images (love.graphics.newImage "assets/Tiles.png"))
   (global tile-quads (gen-quad-table tile-images 32 32 1 37))
 
   (local player-j (math.floor (/ start-tile tile-height)))
   (local player-i (math.floor (math.fmod start-tile tile-height)))
-  (global player {:x (* 32 (- player-i 1))
-                  :y (* 32 (- player-j 1))
+  (global player {:collider (world:newCircleCollider
+                         (* (math.floor (/ start-tile tile-height)) 32)
+                         (* (math.floor (math.fmod start-tile tile-height)) 32)
+                         16)
                   :width 32
                   :height 32
                   :speed 100
@@ -138,112 +161,38 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
   (let [(ok val) (pcall fennel.eval line)]
     (print (if ok (fennel.view val) val))))
 
-(fn player-can-move [player-dir dt]
-  (var can-move true)
-  (let [rough-i (+ 1 (/ player.x 32))
-        rough-j (+ 1 (/ player.y 32))
-        curr-i (math.floor rough-i)
-        curr-j (math.floor rough-j)
-        mod-i (math.fmod player.x 32)
-        mod-j (math.fmod player.y 32)]
-    (when (= player-dir "left")
-      ;;; out of bounds
-      (when (<= player.x 0)
-        (set player.x 0)
-        (set can-move false))
-
-      ;; borders 1 tile
-      (when (and (> curr-i 1)
-                 (= 1 (. (. level-map curr-j) (- curr-i 1)))
-                 (<= mod-i 1))
-        (set can-move false))
-
-      ;; handle colliding with two tiles
-      (when (and (> curr-i 1)
-                 (> tile-height curr-j)
-                 (or (= 1 (. (. level-map curr-j) (- curr-i 1)))
-                     (= 1 (. (. level-map (+ curr-j 1)) (- curr-i 1))))
-                 (<= mod-i 1))
-        (set can-move false)))
-
-    (when (= player-dir "right")
-      ;;; out of bounds
-      (when (<= window-width (+ player.x player.width))
-        (set player.x window-width)
-        (set can-move false))
-
-      ;; borders 1 tile
-      (when (and (> tile-width curr-i)
-                 (= 1 (. (. level-map curr-j) (+ curr-i 1)))
-                 (<= mod-i 1))
-        (set can-move false))
-
-      ;; handle colliding with two tiles
-      (when (and (> tile-width curr-i)
-                 (> tile-height curr-j)
-                 (or (= 1 (. (. level-map curr-j) (+ curr-i 1)))
-                     (= 1 (. (. level-map (+ curr-j 1)) (+ curr-i 1))))
-                 (<= mod-i 1))
-        (set can-move false)))
-
-    (when (= player-dir "up")
-      ;;; out of bounds
-      (when (<= player.y 0)
-        (set player.y 0)
-        (set can-move false))
-
-      ;; borders 1 tile
-      (when (and (> curr-j 1)
-                 (= 1 (. (. level-map (- curr-j 1)) curr-i))
-                 (<= mod-j 1))
-        (set can-move false))
-
-      ;; handle colliding with two tiles
-      (when (and (> tile-width curr-i)
-                 (> curr-j 1)
-                 (or (= 1 (. (. level-map (- curr-j 1)) curr-i))
-                     (= 1 (. (. level-map (- curr-j 1)) (+ curr-i 1))))
-                 (<= mod-j 1))
-        (set can-move false)))
-
-    (when (= player-dir "down")
-      ;;; out of bounds
-      (when (<= window-height (+ player.y player.height))
-        (set player.y (- window-height player.height))
-        (set can-move false))
-
-      ;; borders 1 tile
-      (when (and (> tile-height curr-j)
-                 (= 1 (. (. level-map (+ curr-j 1)) curr-i))
-                 (< mod-i 0))
-        (set can-move false))))
-
-  can-move)
 
 (fn love.update [dt]
-  ;; Quit when escape is pressed
+  (world:update dt)
+
   (when (love.keyboard.isDown :g)
+    (destroy-physics-objects level-map-physics-objects)
     (set level-map (gen-map 750 1))
     (set level-map-tiles (auto-tile level-map))
+    (set level-map-physics-objects (setup-map-physics level-map world))
     (local player-j (math.floor (/ start-tile tile-height)))
     (local player-i (math.floor (math.fmod start-tile tile-height)))
-    (set player.x (* 32 (- player-i 1)))
-    (set player.y (* 32 (- player-j 1))))
+    (player.collider:setPosition
+       (* (math.floor (/ start-tile tile-height)) 32)
+       (* (math.floor (math.fmod start-tile tile-height)) 32)))
+
+  (var x-velocity 0)
+  (var y-velocity 0)
 
   (each [key [dx dy] (pairs dirs)]
-    (when (and (love.keyboard.isDown key) (player-can-move key dt))
-      (let [x (+ player.x (* dx player.speed dt))
-            y (+ player.y (* dy player.speed dt))
-            curr-frame (. (. player.animations player.current-animation) :curr-frame)
+    (when (love.keyboard.isDown key)
+      (let [curr-frame (. (. player.animations player.current-animation) :curr-frame)
             anim-speed (. (. player.animations player.current-animation) :speed)
             total-frames (length (. (. player.animations player.current-animation) :quads))]
-        (set player.x x)
-        (set player.y y)
+        (set x-velocity (* dx player.speed))
+        (set y-velocity (* dy player.speed))
         (var next-frame (+ (* anim-speed dt) curr-frame))
         (when (> next-frame total-frames)
           (set next-frame 1))
         (tset (. (. player.animations) player.current-animation) :curr-frame next-frame)
         (set player.current-animation (.. "running-" key)))))
+
+  (player.collider:setLinearVelocity x-velocity y-velocity)
 
   ;; Quit when escape is pressed
   (when (love.keyboard.isDown :escape)
@@ -258,9 +207,10 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
                           (* (- i 1)  32)
                           (* (- j 1) 32))))
 
+
   (let [curr-player-anim (. (. player.animations) player.current-animation)]
     (love.graphics.draw curr-player-anim.img
                         (. curr-player-anim.quads
                            (math.floor curr-player-anim.curr-frame))
-                        player.x
-                        player.y)))
+                        (- (player.collider:getX) 16)
+                        (- (player.collider:getY) 16))))
