@@ -7,20 +7,33 @@
 (var num-tiles (* tile-width tile-height))
 (var start-tile 1)
 (var value-multiplier 20)
+(var base-x-noise (* 10000 (love.math.random)))
+(var base-y-noise (* 10000 (love.math.random)))
+(var level 1)
 
-(fn new-tile []
+(fn new-rock [x y physics-world]
+  (local collider  (physics-world:newCircleCollider x y 16))
+  (collider:setType "static")
+  (collider:setCollisionClass "rock")
+  (local rock {:x x
+               :y y
+               :collider collider})
+  (rock.collider:setObject rock)
+  rock)
+
+(fn new-tile [x y]
   {:type :wall
    :tile-index 19
    :tile-key 0
    :mined false
-   :value (math.floor (* (love.math.random) value-multiplier))})
+   :value (love.math.noise (* x base-x-noise) (* y base-y-noise))})
 
 (fn init-map []
   (let [tile-map []]
     (for [j 1 tile-height]
       (let [row []]
         (for [i 1 tile-width]
-          (table.insert row (new-tile)))
+          (table.insert row (new-tile i j)))
         (table.insert tile-map row)))
     tile-map))
 
@@ -86,12 +99,43 @@
                              30
                              30))
         (block:setType "static")
+        (block:setCollisionClass "wall")
         (table.insert map-physics-objects block))))
   map-physics-objects)
 
+(fn setup-rocks [tile-map physics-world threshold]
+  (local rock-objects [])
+  (for [j 1 (length tile-map)]
+    (for [i 1 (length (. tile-map j))]
+      (let [curr-tile (. (. tile-map j) i)]
+        (when (and (not (= curr-tile.type :wall))
+                   (> curr-tile.value threshold))
+          (table.insert rock-objects (new-rock
+                                      (+ (* 32 (- i 1)) 16)
+                                      (+ (* 32 (- j 1)) 16)
+                                      physics-world))))))
+  rock-objects)
+
 (fn destroy-physics-objects [physics-objects]
   (each [_ obj (ipairs physics-objects)]
-    (: obj.fixture :destroy)))
+    (obj.fixture:destroy)))
+
+(fn clear-remaining-rock-objects [rock-objects]
+  (each [_ rock (ipairs rock-objects)]
+    (rock.collider:destroy)))
+
+;; assumes obj has x and y properties
+(fn find-object-index [obj objects]
+  (var target-idx -1)
+  (each [idx o (ipairs objects)]
+    (when (and (= obj.x o.x) (= obj.y o.y))
+      (set target-idx idx)))
+  target-idx)
+
+(fn destroy-rock [rock rock-objects]
+  (let [rock-idx (find-object-index rock rock-objects)]
+    (rock.collider:destroy)
+    (table.remove rock-objects rock-idx)))
 
 (fn gen-quad-table [img tile-width tile-height first-tile num-tiles]
   (let [img-width (img:getWidth)
@@ -115,26 +159,35 @@
 while 1 do love.event.push('stdin', io.read('*line')) end") :start)
 
   (global world (wf.newWorld 0 0 true))
+  (world:addCollisionClassTable {:wall {}
+                                 :rock {}
+                                 :player {:ignores [:weapon]}
+                                 :weapon {:ignores [:player]}})
 
   (global level-map (gen-map 750 1))
   (global level-map (auto-tile level-map))
   (global level-map-physics-objects (setup-map-physics level-map world))
+  (global level-map-rock-objects (setup-rocks level-map world 0.8))
   (global tile-images (love.graphics.newImage "assets/Tiles.png"))
   (global tile-quads (gen-quad-table tile-images 32 32 1 37))
+
+  (global rock-image (love.graphics.newImage "assets/rock.png"))
+  (global small-rock-image (love.graphics.newImage "assets/small-rock.png"))
 
   (local player-j (math.floor (/ start-tile tile-height)))
   (local player-i (math.floor (math.fmod start-tile tile-height)))
   (global player {:collider (world:newCircleCollider
                          (* (math.floor (/ start-tile tile-height)) 32)
                          (* (math.floor (math.fmod start-tile tile-height)) 32)
-                         16)
+                         12)
+                  :weapon-collider nil
                   :width 32
                   :height 32
-                  :target-i player-i
-                  :target-j player-j
                   :speed 100
                   :action-active false
+                  :value 0
                   :animations {}})
+  (player.collider:setCollisionClass :player)
   (local player-front (love.graphics.newImage "assets/running-front.png"))
   (tset player :animations :running-down (gen-animation-table
                                           10
@@ -181,16 +234,19 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
   (global debug-strings []))
 
 
-
 (fn love.update [dt]
   (world:update dt)
   (set debug-strings [])
 
   (when (love.keyboard.isDown :g)
     (destroy-physics-objects level-map-physics-objects)
+    (clear-remaining-rock-objects level-map-rock-objects)
+    (set base-x-noise (* 10000 (love.math.random)))
+    (set base-y-noise (* 10000 (love.math.random)))
     (set level-map (gen-map 750 1))
     (set level-map (auto-tile level-map))
     (set level-map-physics-objects (setup-map-physics level-map world))
+    (set level-map-rock-objects (setup-rocks level-map world 0.8))
     (local player-j (math.floor (/ start-tile tile-height)))
     (local player-i (math.floor (math.fmod start-tile tile-height)))
     (player.collider:setPosition
@@ -224,71 +280,56 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
       (when (> next-frame total-frames)
         (set next-frame 1)
         (tset player :action-active false)
+        (player.weapon-collider:destroy)
+        (tset player :weapon-collider nil)
         (tset (. (. player.animations) player.current-animation) :curr-frame next-frame)
         (tset player :current-animation player.previous-animation))
       (when (<= next-frame total-frames)
         (tset (. (. player.animations) player.current-animation) :curr-frame next-frame))))
-
-  ;; update player's target tile
-  (let [player-x (player.collider:getX)
-        player-y (player.collider:getY)
-        player-i (+ (math.floor (/ player-x 32)) 1)
-        player-j (+ (math.floor (/ player-y 32)) 1)
-        mod-i (math.fmod player-x 32)
-        mod-j (math.fmod player-y 32)]
-    (table.insert debug-strings (.. "player x: " (tostring player-x)))
-    (table.insert debug-strings (.. "player y: " (tostring player-y)))
-    (table.insert debug-strings (.. "player i: " (tostring player-i)))
-    (table.insert debug-strings (.. "player j: " (tostring player-j)))
-    (table.insert debug-strings (.. "player mod i: " (tostring mod-i)))
-    (table.insert debug-strings (.. "player mod j: " (tostring mod-j)))
-    (when (= player.current-animation :running-down)
-      (if (and (> mod-j 8)
-               (< player-j tile-height)
-               (= :floor (. (. (. level-map (+ player-j 1)) player-i) :type)))
-          (tset player :target-j (+ player-j 1))
-          (tset player :target-j player-j))
-      (tset player :target-i player-i))
-    (when (= player.current-animation :running-up)
-      (if (and (< mod-j 24)
-               (> player-j 1)
-               (= :floor (. (. (. level-map (- player-j 1)) player-i) :type)))
-          (tset player :target-j (- player-j 1))
-          (tset player :target-j player-j))
-      (tset player :target-i player-i))
-    (when (= player.current-animation :running-left)
-      (if (and (< mod-i 24)
-               (> player-i 1)
-               (= :floor (. (. (. level-map player-j) (- player-i 1)) :type)))
-          (tset player :target-i (- player-i 1))
-          (tset player :target-i player-i))
-      (tset player :target-j player-j))
-    (when (= player.current-animation :running-right)
-      (if (and (> mod-i 8)
-               (< player-i tile-width)
-               (= :floor (. (. (. level-map player-j) (+ player-i 1)) :type)))
-          (tset player :target-i (+ player-i 1))
-          (tset player :target-i player-i))
-      (tset player :target-j player-j)))
-
 
   ;; enable action button
   (when (and (love.keyboard.isDown :space) (not player.action-active))
     (tset player :action-active true)
     (tset player :previous-animation player.current-animation)
     (when (= player.current-animation :running-down)
+      (local collider (world:newCircleCollider
+                       (player.collider:getX)
+                       (+ (player.collider:getY) 5)
+                       12))
+      (collider:setCollisionClass :weapon)
+      (tset player :weapon-collider collider)
       (tset player :current-animation :pickaxe-down))
     (when (= player.current-animation :running-up)
+      (local collider (world:newCircleCollider
+                       (player.collider:getX)
+                       (- (player.collider:getY) 5)
+                       12))
+      (collider:setCollisionClass :weapon)
+      (tset player :weapon-collider collider)
       (tset player :current-animation :pickaxe-up))
     (when (= player.current-animation :running-left)
+      (local collider (world:newCircleCollider
+                       (- (player.collider:getX) 5)
+                       (player.collider:getY)
+                       12))
+      (collider:setCollisionClass :weapon)
+      (tset player :weapon-collider collider)
       (tset player :current-animation :pickaxe-left))
     (when (= player.current-animation :running-right)
-      (tset player :current-animation :pickaxe-right))
+      (local collider (world:newCircleCollider
+                       (+ (player.collider:getX) 5)
+                       (player.collider:getY)
+                       12))
+      (collider:setCollisionClass :weapon)
+      (tset player :weapon-collider collider)
+      (tset player :current-animation :pickaxe-right)))
 
-    (let [target-tile (. (. level-map player.target-j) player.target-i)]
-      (when (not target-tile.mined)
-        (tset target-tile :mined true)
-        (tset target-tile :tile-index (. mined-tiles target-tile.tile-key)))))
+  ;; collision between rock and weapon
+  (when (and player.weapon-collider (player.weapon-collider:enter :rock))
+    (local collision-data (player.weapon-collider:getEnterCollisionData :rock))
+    (local rock (collision-data.collider:getObject))
+    (destroy-rock rock level-map-rock-objects))
+
 
   ;; Quit when escape is pressed
   (when (love.keyboard.isDown :escape)
@@ -304,7 +345,10 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
                             (* (- i 1)  32)
                             (* (- j 1) 32)))))
 
+  (each [_ rock (ipairs level-map-rock-objects)]
+    (love.graphics.draw rock-image (- rock.x 16) (- rock.y 16)))
 
+  (love.graphics.setColor 1 1 1)
   (let [curr-player-anim (. (. player.animations) player.current-animation)]
     (love.graphics.draw curr-player-anim.img
                         (. curr-player-anim.quads
@@ -314,6 +358,4 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
 
   ;; debug info
   (each [idx str (ipairs debug-strings)]
-    (love.graphics.print str 10 (* 15 idx)))
-  (love.graphics.rectangle "line" (* 32 (- player.target-i 1)) (* 32 (- player.target-j 1)) 32 32)
-  )
+    (love.graphics.print str 10 (* 15 idx))))
