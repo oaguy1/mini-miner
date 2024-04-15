@@ -5,11 +5,27 @@
 (local bg-tiles {"" 8 :lt 1 :t 2 :rt 3 :l 7 :f 8 :r 9 :lb 13 :b 14 :rb 15 :lr 20 :tb 22 :lrt 28 :lrb 29 :ltb 30 :rtb 31 :lrtb 32})
 (local mined-tiles {"" 11 :lt 4 :t 5 :rt 6 :l 10 :f 11 :r 12 :lb 16 :b 17 :rb 18 :lr 25 :tb 24 :lrt 35 :lrb 36 :ltb 33 :rtb 34 :lrtb 37})
 (var num-tiles (* tile-width tile-height))
-(var start-tile 1)
+(var end-map-gen-i 1)
+(var end-map-gen-j 1)
 (var value-multiplier 20)
 (var base-x-noise (* 10000 (love.math.random)))
 (var base-y-noise (* 10000 (love.math.random)))
 (var level 1)
+
+(fn register-item [img name desc effect]
+  {:img img
+   :name name
+   :desc desc
+   :effect effect})
+
+(fn new-particle [img collider x y dx dy ttl]
+  {:img img
+   :collider collider
+   :x x
+   :y y
+   :dx dx
+   :dy dy
+   :ttl ttl})
 
 (fn new-rock [x y physics-world]
   (local collider  (physics-world:newCircleCollider x y 16))
@@ -17,6 +33,7 @@
   (collider:setCollisionClass "rock")
   (local rock {:x x
                :y y
+               :item nil
                :collider collider})
   (rock.collider:setObject rock)
   rock)
@@ -37,19 +54,22 @@
         (table.insert tile-map row)))
     tile-map))
 
-(fn random-dir []
+(fn random-item-from-table [tbl]
   (local keyset [])
-  (each [key (pairs dirs)]
+  (each [key (pairs tbl)]
     (table.insert keyset key))
 
   (let [choice-index (love.math.random (length keyset))
         choice-key (. keyset choice-index)
-        choice (. dirs choice-key)]
+        choice (. tbl choice-key)]
     (unpack choice)))
 
+(fn random-dir []
+  (random-item-from-table dirs))
+
 (fn gen-map [max-tunnels max-length]
-  (let [tile-map (init-map)]
-    (set start-tile (love.math.random num-tiles))
+  (let [tile-map (init-map)
+        start-tile (love.math.random num-tiles)]
     (var curr-j (math.floor (/ start-tile tile-height)))
     (var curr-i (math.floor (math.fmod start-tile tile-height)))
 
@@ -68,6 +88,10 @@
           (tset (. (. tile-map curr-j) curr-i) :type :floor)
           (set curr-j (+ curr-j dj))
           (set curr-i (+ curr-i di)))))
+
+    (set end-map-gen-i curr-i)
+    (set end-map-gen-j curr-j)
+
     tile-map))
 
 (fn auto-tile [tile-map]
@@ -90,9 +114,11 @@
 
 (fn setup-map-physics [tile-map physics-world]
   (local map-physics-objects [])
-  (for [j 1 (length tile-map)]
-    (for [i 1 (length (. tile-map j))]
-      (when (= (. (. (. tile-map j) i) :type) :wall)
+
+  (for [j 0 (+ tile-height 1)]
+    (for [i 0 (+ tile-width 1)]
+      ;; handle borders
+      (when (or (= i 0) (= i (+ 1 tile-width)) (= j 0) (= j (+ 1 tile-height)))
         (local block (physics-world:newRectangleCollider
                              (+ (* (- i 1)  32) 1)
                              (+ (* (- j 1) 32) 1)
@@ -100,10 +126,22 @@
                              30))
         (block:setType "static")
         (block:setCollisionClass "wall")
-        (table.insert map-physics-objects block))))
+        (table.insert map-physics-objects block))
+
+      ;; handle map
+      (when (not (or (= i 0) (= i (+ 1 tile-width)) (= j 0) (= j (+ 1 tile-height))))
+        (when (= (. (. (. tile-map j) i) :type) :wall)
+            (local block (physics-world:newRectangleCollider
+                                (+ (* (- i 1)  32) 1)
+                                (+ (* (- j 1) 32) 1)
+                                30
+                                30))
+            (block:setType "static")
+            (block:setCollisionClass "wall")
+            (table.insert map-physics-objects block)))))
   map-physics-objects)
 
-(fn setup-rocks [tile-map physics-world threshold]
+(fn setup-rocks [tile-map physics-world threshold item-prototypes]
   (local rock-objects [])
   (for [j 1 (length tile-map)]
     (for [i 1 (length (. tile-map j))]
@@ -114,6 +152,11 @@
                                       (+ (* 32 (- i 1)) 16)
                                       (+ (* 32 (- j 1)) 16)
                                       physics-world))))))
+
+  (let [random-idx (love.math.random (length rock-objects))
+        random-rock (. rock-objects random-idx)]
+    (tset random-rock :item (. item-prototypes :next-level-ladder)))
+
   rock-objects)
 
 (fn destroy-physics-objects [physics-objects]
@@ -132,9 +175,26 @@
       (set target-idx idx)))
   target-idx)
 
-(fn destroy-rock [rock rock-objects]
-  (let [rock-idx (find-object-index rock rock-objects)]
+(fn destroy-rock [rock rock-objects physics-world small-rock-img particle-objects items]
+  (let [rock-idx (find-object-index rock rock-objects)
+        particle-force-multipier 5]
     (rock.collider:destroy)
+    (when rock.item
+      (local item rock.item)
+      (tset item :x rock.x)
+      (tset item :y rock.y)
+      (table.insert items item))
+    (when (not rock.item)
+      (for [i 1 8]
+        (local new-collider (physics-world:newCircleCollider rock.x rock.y 4))
+        (new-collider:setCollisionClass :particle)
+        (table.insert particle-objects (new-particle small-rock-img
+                                                     new-collider
+                                                     rock.x
+                                                     rock.y
+                                                     (* (love.math.random -1 1) particle-force-multipier)
+                                                     (* (love.math.random -1 1) particle-force-multipier)
+                                                     (love.math.random)))))
     (table.remove rock-objects rock-idx)))
 
 (fn gen-quad-table [img tile-width tile-height first-tile num-tiles]
@@ -158,27 +218,40 @@
   (: (love.thread.newThread "require('love.event')
 while 1 do love.event.push('stdin', io.read('*line')) end") :start)
 
+  ;; physics init
   (global world (wf.newWorld 0 0 true))
   (world:addCollisionClassTable {:wall {}
                                  :rock {}
+                                 :particle {}
                                  :player {:ignores [:weapon]}
                                  :weapon {:ignores [:player]}})
 
-  (global level-map (gen-map 750 1))
-  (global level-map (auto-tile level-map))
-  (global level-map-physics-objects (setup-map-physics level-map world))
-  (global level-map-rock-objects (setup-rocks level-map world 0.8))
+  
+  (global level-map nil)
+  (global level-map-physics-objects nil)
+  (global level-map-rock-objects nil)
   (global tile-images (love.graphics.newImage "assets/Tiles.png"))
   (global tile-quads (gen-quad-table tile-images 32 32 1 37))
+  (global particles [])
+  (global item-prototypes {})
+  (global item-objects [])
+  (global generate-world (lambda []
+                         (set base-x-noise (* 10000 (love.math.random)))
+                         (set base-y-noise (* 10000 (love.math.random)))
+                         (set level-map (gen-map 750 1))
+                         (set level-map (auto-tile level-map))
+                         (set level-map-physics-objects (setup-map-physics level-map world))
+                         (set level-map-rock-objects (setup-rocks level-map world 0.9 item-prototypes))))
 
+
+  ;; global assets load
   (global rock-image (love.graphics.newImage "assets/rock.png"))
   (global small-rock-image (love.graphics.newImage "assets/small-rock.png"))
 
-  (local player-j (math.floor (/ start-tile tile-height)))
-  (local player-i (math.floor (math.fmod start-tile tile-height)))
+  ;; player collider and animation setup
   (global player {:collider (world:newCircleCollider
-                         (* (math.floor (/ start-tile tile-height)) 32)
-                         (* (math.floor (math.fmod start-tile tile-height)) 32)
+                         (+ (* end-map-gen-i 32) 16)
+                         (+ (* end-map-gen-j 32) 16)
                          12)
                   :weapon-collider nil
                   :width 32
@@ -231,6 +304,20 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
   (tset player :current-animation :running-down)
   (tset player :previous-animation nil)
 
+  ;; items
+  (local new-level-ladder-image (love.graphics.newImage "assets/new-level-ladder.png"))
+  (tset item-prototypes :new-level-ladder (register-item new-level-ladder-image
+                                                                 "ladder"
+                                                                 "Brings you to the next level"
+                                                                 (lambda []
+                                                                   (set level (+ level 1))
+                                                                   (destroy-physics-objects level-map-physics-objects)
+                                                                   (clear-remaining-rock-objects level-map-rock-objects)
+                                                                   (generate-world)
+                                                                   (player.collider:setPosition (+ (* end-map-gen-i 32) 16) (+ (* end-map-gen-j 32) 16)))))
+
+  (generate-world)
+  (player.collider:setPosition (+ (* end-map-gen-i 32) 16) (+ (* end-map-gen-j 32) 16))
   (global debug-strings []))
 
 
@@ -241,17 +328,8 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
   (when (love.keyboard.isDown :g)
     (destroy-physics-objects level-map-physics-objects)
     (clear-remaining-rock-objects level-map-rock-objects)
-    (set base-x-noise (* 10000 (love.math.random)))
-    (set base-y-noise (* 10000 (love.math.random)))
-    (set level-map (gen-map 750 1))
-    (set level-map (auto-tile level-map))
-    (set level-map-physics-objects (setup-map-physics level-map world))
-    (set level-map-rock-objects (setup-rocks level-map world 0.8))
-    (local player-j (math.floor (/ start-tile tile-height)))
-    (local player-i (math.floor (math.fmod start-tile tile-height)))
-    (player.collider:setPosition
-       (* (math.floor (/ start-tile tile-height)) 32)
-       (* (math.floor (math.fmod start-tile tile-height)) 32)))
+    (generate-world)
+    (player.collider:setPosition (+ (* end-map-gen-i 32) 16) (+ (* end-map-gen-j 32) 16)))
 
   (var x-velocity 0)
   (var y-velocity 0)
@@ -328,7 +406,16 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
   (when (and player.weapon-collider (player.weapon-collider:enter :rock))
     (local collision-data (player.weapon-collider:getEnterCollisionData :rock))
     (local rock (collision-data.collider:getObject))
-    (destroy-rock rock level-map-rock-objects))
+    (destroy-rock rock level-map-rock-objects world small-rock-image particles item-objects))
+
+  ;; update particles
+  (each [idx particle (ipairs particles)]
+    (when (< particle.ttl 0)
+      (table.remove particles idx)
+      (particle.collider:destroy))
+    (when (> particle.ttl 0)
+      (tset particle :ttl (- particle.ttl dt))
+      (particle.collider:setLinearVelocity particle.dx particle.dy)))
 
 
   ;; Quit when escape is pressed
@@ -344,6 +431,12 @@ while 1 do love.event.push('stdin', io.read('*line')) end") :start)
                             (. tile-quads curr-tile.tile-index)
                             (* (- i 1)  32)
                             (* (- j 1) 32)))))
+
+  (each [_ item (ipairs item-objects)]
+    (love.graphics.draw item.img item.x item.y))
+
+  (each [_ particle (ipairs particles)]
+    (love.graphics.draw particle.img (particle.collider:getX) (particle.collider:getY)))
 
   (each [_ rock (ipairs level-map-rock-objects)]
     (love.graphics.draw rock-image (- rock.x 16) (- rock.y 16)))
